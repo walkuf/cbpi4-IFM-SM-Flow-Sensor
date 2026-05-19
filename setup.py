@@ -1,22 +1,19 @@
 from setuptools import setup, find_packages
 
 setup(
-    name='cbpi4-IFM-SM-Flow-Sensor',
-    version='0.0.1',
-    description='CBPI4 custom plugin for IFM SM004 Flow Sensor',
-    author='Your Name',
-    author_email='your.email@example.com',
-    url='https://github.com/walkuf/cbpi4-IFM-SM-Flow-Sensor',
-    license='MIT',
+    name="cbpi4-IFM-SM-Flow-Sensor",
+    version="0.0.1",
+    description="CraftBeerPi4 sensor plugin for the IFM SM6004 magnetic-inductive flow sensor via ADS1115 ADC",
+    long_description=open("README.md").read(),
+    long_description_content_type="text/markdown",
+    author="walkuf",
+    url="https://github.com/walkuf/cbpi4-IFM-SM-Flow-Sensor",
+    license="GPL-3.0",
     packages=find_packages(),
-    include_package_data=True,
     install_requires=[
-        'cbpi>=4.0.0',
-        'pymodbus>=2.5.0',
+        "adafruit-circuitpython-ads1x15",
+        "adafruit-blinka",
     ],
-    entry_points={
-        'cbpi_plugins': [
-            'cbpi4_IFM_SM004 = cbpi4_IFM_SM004:setup',
-        ]
-    }
+    keywords=["cbpi4", "craftbeerpi", "flow sensor", "IFM", "SM6004", "ADS1115"],
+    include_package_data=True,
 )
