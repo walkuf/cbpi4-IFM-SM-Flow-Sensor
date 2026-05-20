@@ -13,6 +13,7 @@ setup(
     install_requires=[
         "adafruit-circuitpython-ads1x15",
         "adafruit-blinka",
+        "adafruit-circuitpython-bitbangio",
     ],
     keywords=["cbpi4", "craftbeerpi", "flow sensor", "IFM", "SM6004", "ADS1115"],
     include_package_data=True,
