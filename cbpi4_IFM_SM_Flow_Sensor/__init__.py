@@ -29,33 +29,41 @@ logger = logging.getLogger(__name__)
 class IFM_SM6004_ADS1115_Sensor(CBPiSensor):
 
     async def run(self):
-        try:
-            i2c = bitbangio.I2C(board.D26, board.D21, frequency=50000)
-            i2c_addr = int(self.props.get("Address", "0x48"), 16)
-            ads = ADS.ADS1115(i2c, address=i2c_addr)
-            selected_pin = int(self.props.get("Channel", 0))
-            chan = AnalogIn(ads, selected_pin)
-            resistor = float(self.props.get("Resistor", 150))
-            ma_low   = float(self.props.get("mA_Low",  4))
-            ma_high  = float(self.props.get("mA_High", 20))
-            min_val  = float(self.props.get("MinVal",  0))
-            max_val  = float(self.props.get("MaxVal",  3))
-            v_low  = (ma_low  / 1000.0) * resistor
-            v_high = (ma_high / 1000.0) * resistor
-            logger.info(f"IFM SM6004 started: addr={hex(i2c_addr)} ch={selected_pin}")
-        except Exception as e:
-            logger.error(f"IFM SM6004 init failed: {e}")
-            return
+        i2c_addr     = int(self.props.get("Address", "0x48"), 16)
+        selected_pin = int(self.props.get("Channel", 0))
+        resistor     = float(self.props.get("Resistor", 150))
+        ma_low       = float(self.props.get("mA_Low",  4))
+        ma_high      = float(self.props.get("mA_High", 20))
+        min_val      = float(self.props.get("MinVal",  0))
+        max_val      = float(self.props.get("MaxVal",  3))
+        v_low        = (ma_low  / 1000.0) * resistor
+        v_high       = (ma_high / 1000.0) * resistor
+
+        chan = None
 
         while self.running:
+            if chan is None:
+                try:
+                    i2c  = bitbangio.I2C(board.D26, board.D21, frequency=50000)
+                    ads  = ADS.ADS1115(i2c, address=i2c_addr)
+                    chan = AnalogIn(ads, selected_pin)
+                    logger.info(f"IFM SM6004 connected: addr={hex(i2c_addr)} ch={selected_pin}")
+                except Exception as e:
+                    logger.error(f"IFM SM6004 init failed: {e} — retrying in 5s")
+                    chan = None
+                    await asyncio.sleep(5)
+                    continue
+
             try:
                 voltage = chan.voltage
                 voltage = max(v_low, min(v_high, voltage))
-                ratio = (voltage - v_low) / (v_high - v_low)
-                val = round(min_val + ratio * (max_val - min_val), 3)
+                ratio   = (voltage - v_low) / (v_high - v_low)
+                val     = round(min_val + ratio * (max_val - min_val), 3)
                 self.push_update(val)
             except Exception as e:
-                logger.error(f"IFM SM6004 read error: {e}")
+                logger.error(f"IFM SM6004 read error: {e} — reinitializing")
+                chan = None
+
             await asyncio.sleep(1)
 
 
