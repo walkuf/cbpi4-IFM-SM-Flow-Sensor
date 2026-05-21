@@ -8,6 +8,21 @@ from adafruit_ads1x15.analog_in import AnalogIn
 
 logger = logging.getLogger(__name__)
 
+# Shared I2C bus and ADS1115 instance — created once, reused by all sensor instances
+_i2c = None
+_ads = {}
+
+def _get_ads(i2c_addr):
+    global _i2c, _ads
+    if _i2c is None:
+        _i2c = bitbangio.I2C(board.D26, board.D21, frequency=50000)
+        logger.warning("Shared I2C bus initialized on GPIO26/GPIO21")
+    if i2c_addr not in _ads:
+        _ads[i2c_addr] = ADS.ADS1115(_i2c, address=i2c_addr)
+        logger.warning(f"ADS1115 initialized at address {hex(i2c_addr)}")
+    return _ads[i2c_addr]
+
+
 @parameters([
     Property.Select(label="Address", options=["0x48", "0x49", "0x4A", "0x4B"],
                     description="I2C address of the ADS1115 (default 0x48)"),
@@ -44,10 +59,9 @@ class IFM_SM6004_ADS1115_Sensor(CBPiSensor):
         while self.running:
             if chan is None:
                 try:
-                    i2c  = bitbangio.I2C(board.D26, board.D21, frequency=50000)
-                    ads  = ADS.ADS1115(i2c, address=i2c_addr)
+                    ads  = _get_ads(i2c_addr)
                     chan = AnalogIn(ads, selected_pin)
-                    logger.info(f"IFM SM6004 connected: addr={hex(i2c_addr)} ch={selected_pin}")
+                    logger.warning(f"IFM SM6004 connected: addr={hex(i2c_addr)} ch={selected_pin}")
                 except Exception as e:
                     logger.error(f"IFM SM6004 init failed: {e} — retrying in 5s")
                     chan = None
@@ -61,7 +75,7 @@ class IFM_SM6004_ADS1115_Sensor(CBPiSensor):
                 val     = round(min_val + ratio * (max_val - min_val), 3)
                 self.push_update(val)
             except Exception as e:
-                logger.error(f"IFM SM6004 read error: {e} — reinitializing")
+                logger.error(f"IFM SM6004 read error ch{selected_pin}: {e} — reinitializing")
                 chan = None
 
             await asyncio.sleep(1)
