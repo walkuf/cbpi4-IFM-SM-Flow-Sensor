@@ -1,0 +1,219 @@
+import logging
+import asyncio
+from cbpi.api import *
+
+logger = logging.getLogger(__name__)
+
+
+# ---------------------------------------------------------------------------
+# Helper: read the current value of a CBPI4 sensor by ID
+# ---------------------------------------------------------------------------
+def _read_sensor(cbpi, sensor_id):
+    try:
+        sensor = cbpi.sensor.find_by_id(sensor_id)
+        if sensor is None:
+            return None
+        return sensor.instance.state.get("value", None)
+    except Exception as e:
+        logger.error(f"Error reading sensor {sensor_id}: {e}")
+        return None
+
+
+# ---------------------------------------------------------------------------
+# Step 1 – Volume Transfer
+#   One actor group, one volume setpoint.
+#   Low-flow cutoff activates after a configurable minimum run time.
+#   Sends a notification and waits for confirmation before advancing.
+# ---------------------------------------------------------------------------
+@parameters([
+    Property.Sensor(label="FlowSensor",
+                    description="Flow sensor to monitor (G/min)"),
+    Property.Actor(label="ActorGroup",
+                   description="Actor group to run during transfer"),
+    Property.Number(label="TargetVolume", configurable=True, default_value=5,
+                    description="Volume setpoint in gallons to stop transfer"),
+    Property.Select(label="LowFlowCutoff", options=["0.05", "0.10", "0.15", "0.20"],
+                    description="Flow rate (G/min) below which transfer is considered done"),
+    Property.Number(label="MinRunTime", configurable=True, default_value=60,
+                    description="Seconds before low-flow cutoff becomes active"),
+])
+class VolumeTransferStep(CBPiStep):
+
+    async def on_timer_done(self, timer):
+        pass
+
+    async def run(self):
+        target_volume   = float(self.props.get("TargetVolume", 5))
+        low_flow_cutoff = float(self.props.get("LowFlowCutoff", "0.05"))
+        min_run_time    = float(self.props.get("MinRunTime", 60))
+        flow_sensor_id  = self.props.get("FlowSensor")
+        actor_id        = self.props.get("ActorGroup")
+
+        accumulated_volume = 0.0
+        elapsed = 0.0
+        stop_reason = None
+
+        if actor_id:
+            await self.actor_on(actor_id)
+            logger.info(f"VolumeTransfer: actor {actor_id} ON")
+
+        await self.push_update()
+
+        while self.running:
+            await asyncio.sleep(1)
+            elapsed += 1
+
+            flow_rate = _read_sensor(self.cbpi, flow_sensor_id)
+            if flow_rate is None:
+                flow_rate = 0.0
+
+            accumulated_volume += flow_rate / 60.0
+
+            logger.debug(f"VolumeTransfer: elapsed={elapsed:.0f}s "
+                         f"flow={flow_rate:.3f} G/min "
+                         f"volume={accumulated_volume:.3f} gal")
+
+            if accumulated_volume >= target_volume:
+                stop_reason = f"Target volume reached: {accumulated_volume:.2f} gal"
+                break
+
+            if elapsed >= min_run_time and flow_rate <= low_flow_cutoff:
+                stop_reason = (f"Low flow detected: {flow_rate:.3f} G/min "
+                               f"after {elapsed:.0f}s")
+                break
+
+        if actor_id:
+            await self.actor_off(actor_id)
+            logger.info(f"VolumeTransfer: actor {actor_id} OFF")
+
+        if stop_reason:
+            logger.info(f"VolumeTransfer complete: {stop_reason}")
+            await self.push_update()
+            self.summary = (f"Transfer complete — {stop_reason}\n"
+                            f"Total volume: {accumulated_volume:.2f} gal\n"
+                            f"Confirm to advance to next step.")
+            await self.cbpi.notify(
+                "Volume Transfer Complete",
+                f"{stop_reason} | Total: {accumulated_volume:.2f} gal. "
+                f"Tap to advance.",
+                NotificationType.SUCCESS
+            )
+
+        await self.finish()
+
+    async def reset(self):
+        pass
+
+
+# ---------------------------------------------------------------------------
+# Step 2 – Fly Sparge Transfer
+#   Two actor groups, two flow sensors, two volume setpoints.
+#   Each actor group shuts down independently when its volume is reached.
+#   Step completes when both groups have shut down.
+#   Sends a notification and waits for confirmation before advancing.
+# ---------------------------------------------------------------------------
+@parameters([
+    Property.Sensor(label="FlowSensor1",
+                    description="Flow sensor for HLT group (G/min)"),
+    Property.Actor(label="ActorGroup1",
+                   description="HLT actor group (sparge water in)"),
+    Property.Number(label="TargetVolume1", configurable=True, default_value=7,
+                    description="Volume setpoint in gallons to stop HLT group"),
+    Property.Sensor(label="FlowSensor2",
+                    description="Flow sensor for Boil/lauter group (G/min)"),
+    Property.Actor(label="ActorGroup2",
+                   description="Boil/lauter actor group (wort out)"),
+    Property.Number(label="TargetVolume2", configurable=True, default_value=7,
+                    description="Volume setpoint in gallons to stop Boil/lauter group"),
+])
+class FlySpargeTransferStep(CBPiStep):
+
+    async def on_timer_done(self, timer):
+        pass
+
+    async def run(self):
+        target1     = float(self.props.get("TargetVolume1", 7))
+        target2     = float(self.props.get("TargetVolume2", 7))
+        sensor1_id  = self.props.get("FlowSensor1")
+        sensor2_id  = self.props.get("FlowSensor2")
+        actor1_id   = self.props.get("ActorGroup1")
+        actor2_id   = self.props.get("ActorGroup2")
+
+        volume1 = 0.0
+        volume2 = 0.0
+        group1_done = False
+        group2_done = False
+
+        if actor1_id:
+            await self.actor_on(actor1_id)
+            logger.info(f"FlySpargeTransfer: actor1 {actor1_id} ON")
+        if actor2_id:
+            await self.actor_on(actor2_id)
+            logger.info(f"FlySpargeTransfer: actor2 {actor2_id} ON")
+
+        await self.push_update()
+
+        while self.running:
+            await asyncio.sleep(1)
+
+            if not group1_done:
+                flow1 = _read_sensor(self.cbpi, sensor1_id) or 0.0
+                volume1 += flow1 / 60.0
+                logger.debug(f"FlySpargeTransfer: HLT flow={flow1:.3f} "
+                             f"vol={volume1:.3f} gal")
+                if volume1 >= target1:
+                    if actor1_id:
+                        await self.actor_off(actor1_id)
+                        logger.info(f"FlySpargeTransfer: actor1 {actor1_id} OFF "
+                                    f"— HLT target reached {volume1:.2f} gal")
+                    group1_done = True
+                    await self.cbpi.notify(
+                        "Fly Sparge — HLT Complete",
+                        f"HLT group stopped at {volume1:.2f} gal.",
+                        NotificationType.INFO
+                    )
+
+            if not group2_done:
+                flow2 = _read_sensor(self.cbpi, sensor2_id) or 0.0
+                volume2 += flow2 / 60.0
+                logger.debug(f"FlySpargeTransfer: Lauter flow={flow2:.3f} "
+                             f"vol={volume2:.3f} gal")
+                if volume2 >= target2:
+                    if actor2_id:
+                        await self.actor_off(actor2_id)
+                        logger.info(f"FlySpargeTransfer: actor2 {actor2_id} OFF "
+                                    f"— Lauter target reached {volume2:.2f} gal")
+                    group2_done = True
+                    await self.cbpi.notify(
+                        "Fly Sparge — Lauter Complete",
+                        f"Lauter group stopped at {volume2:.2f} gal.",
+                        NotificationType.INFO
+                    )
+
+            if group1_done and group2_done:
+                break
+
+        if actor1_id and not group1_done:
+            await self.actor_off(actor1_id)
+        if actor2_id and not group2_done:
+            await self.actor_off(actor2_id)
+
+        self.summary = (f"Fly Sparge complete!\n"
+                        f"HLT: {volume1:.2f} gal | Lauter: {volume2:.2f} gal\n"
+                        f"Confirm to advance to next step.")
+        await self.cbpi.notify(
+            "Fly Sparge Complete",
+            f"HLT: {volume1:.2f} gal | Lauter: {volume2:.2f} gal. "
+            f"Tap to advance.",
+            NotificationType.SUCCESS
+        )
+
+        await self.finish()
+
+    async def reset(self):
+        pass
+
+
+def setup(cbpi):
+    cbpi.plugin.register("VolumeTransferStep", VolumeTransferStep)
+    cbpi.plugin.register("FlySpargeTransferStep", FlySpargeTransferStep)
